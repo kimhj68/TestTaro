@@ -136,7 +136,7 @@
 
   // 버스 도착 정보 제공
   function fetchBusArrivalInfo(stationId, busNo) {
-      const url = `http://apis.data.go.kr/6260000/BusanBIMS/stopArrByBstopid?bstopid=${stationId}&serviceKey=${busanServiceKey}`;
+      const url = `https://apis.data.go.kr/6260000/BusanBIMS/stopArrByBstopid?bstopid=${stationId}&serviceKey=${busanServiceKey}`;
 
       return fetch(url)
           .then(res => res.text())
