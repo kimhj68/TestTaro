@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>도착지 자동완성 & 대중교통 경로</title>
   <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
   <style>
@@ -31,19 +31,14 @@
     const $endInput = $('#end');
     const $endResults = $('#end-results');
 
-    // 현재 위치 설정
     navigator.geolocation?.getCurrentPosition(
       pos => {
-        startCoords = {
-          x: pos.coords.longitude,
-          y: pos.coords.latitude
-        };
+        startCoords = { x: pos.coords.longitude, y: pos.coords.latitude };
         console.log('현재 위치:', startCoords);
       },
       () => alert('위치 정보를 가져올 수 없습니다.')
     );
 
-    // 도착지 자동완성
     $endInput.on('keyup', function () {
       const keyword = $(this).val().trim();
       if (keyword.length < 2) return $endResults.empty();
@@ -60,14 +55,11 @@
         $endResults.empty();
 
         pois.forEach(poi => {
-          $("<li>")
-            .text(poi.name)
-            .on("click", () => {
-              endCoords = { x: poi.frontLon, y: poi.frontLat };
-              $endResults.empty();
-              fetchTransitRoute();
-            })
-            .appendTo($endResults);
+          $("<li>").text(poi.name).on("click", () => {
+            endCoords = { x: poi.frontLon, y: poi.frontLat };
+            $endResults.empty();
+            fetchTransitRoute();
+          }).appendTo($endResults);
         });
       });
     });
@@ -77,18 +69,14 @@
     if (!startCoords || !endCoords) return alert("출발지 또는 도착지 좌표가 없습니다.");
 
     const url = `https://api.odsay.com/v1/api/searchPubTransPathT?SX=${startCoords.x}&SY=${startCoords.y}&EX=${endCoords.x}&EY=${endCoords.y}&SearchPathType=2&apiKey=${odsayKey}`;
-
     const response = await $.get(url);
     const paths = response.result?.path?.slice(0, 4);
     if (!paths || paths.length === 0) return alert("경로를 찾을 수 없습니다.");
 
     const busArrivalCache = new Map();
 
-    // 모든 경로 분석 (walk, transfers, min1 도착시간 포함)
     const scoredPaths = await Promise.all(paths.map(async (path) => {
-      let walkTime = 0;
-      let transfers = path.info.busTransitCount;
-      let minArrival = Infinity;
+      let walkTime = 0, transfers = path.info.busTransitCount, minArrival = Infinity, isValid = true;
 
       for (const sub of path.subPath) {
         if (sub.trafficType === 3) {
@@ -97,19 +85,18 @@
           const busNo = sub.lane[0].busNo;
           const stationId = sub.startLocalStationID;
           const cacheKey = `${stationId}_${busNo}`;
-          let min1 = 999;
+          let min1;
 
           if (busArrivalCache.has(cacheKey)) {
             min1 = busArrivalCache.get(cacheKey);
           } else {
-            try {
-              const html = await fetchBusArrivalInfo(stationId, busNo);
-              const match = html.match(/(\d+)분 후/);
-              if (match) min1 = parseInt(match[1]);
-              busArrivalCache.set(cacheKey, min1);
-            } catch {
-              min1 = 999;
-            }
+            min1 = await getMinArrivalTime(stationId, busNo);
+            busArrivalCache.set(cacheKey, min1);
+          }
+
+          if (min1 === null) {
+            isValid = false;
+            continue;
           }
 
           if (min1 < minArrival) minArrival = min1;
@@ -117,43 +104,33 @@
       }
 
       return {
-        path,
-        walkTime,
-        transfers,
-        minArrival,
-        totalTime: path.info.totalTime
+        path, walkTime, transfers, minArrival, totalTime: path.info.totalTime, isValid
       };
     }));
 
-    // 최단 시간 경로
-    const fastest = scoredPaths.reduce((a, b) => (a.totalTime < b.totalTime ? a : b));
-    
-    // 최적 경로 (조건 정렬)
-    const sorted = [...scoredPaths].sort((a, b) => {
+    const best = scoredPaths.sort((a, b) => {
       if (a.transfers !== b.transfers) return a.transfers - b.transfers;
       if (a.walkTime !== b.walkTime) return a.walkTime - b.walkTime;
       return a.minArrival - b.minArrival;
-    });
-    const best = sorted[0];
+    })[0];
+
+    const validPaths = scoredPaths.filter(p => p.isValid);
+    const fastest = validPaths.reduce((a, b) => a.totalTime < b.totalTime ? a : b, validPaths[0]);
+    const showFastest = fastest && fastest.totalTime < best.totalTime && fastest !== best;
 
     const $result = $("#route-result").empty();
-
-    // 두 경로가 다르면 추천 경로도 함께 표시
-    const showFastest = fastest.path.info.totalTime < best.path.info.totalTime;
-
     if (showFastest) {
       $result.append(`<h2 style="color:#0a58ca;">🚀 추천 경로 (최단 소요시간)</h2>`);
-      renderRoute(fastest, busArrivalCache, $result);
+      await renderRoute(fastest, busArrivalCache, $result);
     }
 
     $result.append(`<h2 style="color:#198754;">⭐ 최적 경로 (환승/도보/도착시간 기준)</h2>`);
-    renderRoute(best, busArrivalCache, $result);
+    await renderRoute(best, busArrivalCache, $result);
   }
 
   async function renderRoute(routeData, cache, $container) {
     const { path } = routeData;
     const { totalTime, busTransitCount } = path.info;
-
     const $card = $(`<div style="margin-bottom:20px;padding:10px;background:#fff;border:1px solid #ccc;border-radius:8px;">
       <h3>소요시간: ${totalTime}분 (버스 환승 ${busTransitCount}회)</h3>
     </div>`);
@@ -175,12 +152,12 @@
           <div>
             <p><strong>버스 탑승:</strong> ${busNo}</p>
             <p>출발: ${startName} (ID: ${stationId}) → 도착: ${endName} (ID: ${endLocalStationID})</p>
-          </div>
-        `).append($arrival);
+          </div>`).append($arrival);
         $card.append($bus);
 
         if (cache.has(cacheKey)) {
-          $arrival.html(`도착까지 약 ${cache.get(cacheKey)}분`);
+          const val = cache.get(cacheKey);
+          $arrival.html(val !== null ? `도착까지 약 ${val}분` : "도착 정보 없음");
         } else {
           try {
             const html = await fetchBusArrivalInfo(stationId, busNo);
@@ -196,38 +173,49 @@
     $container.append($card);
   }
 
+  async function getMinArrivalTime(stationId, busNo) {
+    const url = `https://apis.data.go.kr/6260000/BusanBIMS/stopArrByBstopid?bstopid=${stationId}&serviceKey=${busanServiceKey}`;
+    try {
+      const res = await fetch(url);
+      const xmlStr = await res.text();
+      const parser = new DOMParser();
+      const xml = parser.parseFromString(xmlStr, "application/xml");
+      const items = [...xml.getElementsByTagName("item")];
+      const match = items.find(item => getText(item, "lineno") === busNo);
+      if (!match) return null;
 
-  // 버스 도착 정보 제공
+      const min1 = parseInt(getText(match, "min1"));
+      return isNaN(min1) ? null : min1;
+    } catch {
+      return null;
+    }
+  }
+
   function fetchBusArrivalInfo(stationId, busNo) {
-      const url = `https://apis.data.go.kr/6260000/BusanBIMS/stopArrByBstopid?bstopid=${stationId}&serviceKey=${busanServiceKey}`;
+    const url = `https://apis.data.go.kr/6260000/BusanBIMS/stopArrByBstopid?bstopid=${stationId}&serviceKey=${busanServiceKey}`;
+    return fetch(url)
+      .then(res => res.text())
+      .then(xmlStr => {
+        const parser = new DOMParser();
+        const xml = parser.parseFromString(xmlStr, "application/xml");
+        const items = [...xml.getElementsByTagName("item")];
+        const matches = items.filter(item => getText(item, "lineno") === busNo);
+        if (!matches.length) return "해당 버스 도착 정보 없음";
 
-      return fetch(url)
-          .then(res => res.text())
-          .then(xmlStr => {
-          const parser = new DOMParser();
-          const xml = parser.parseFromString(xmlStr, "application/xml");
-          const items = [...xml.getElementsByTagName("item")];
-
-          const matches = items.filter(item => getText(item, "lineno") === busNo);
-          if (!matches.length) return "해당 버스 도착 정보 없음";
-
-          const html = matches.map(item => {
-              const car1 = getText(item, "carno1");
-              const min1 = getText(item, "min1");
-              const car2 = getText(item, "carno2");
-              const min2 = getText(item, "min2");
-              return `<li>${busNo}번 → 차량1: ${car1} (${min1}분 후), 차량2: ${car2} (${min2}분 후)</li>`;
-          }).join("");
-
-          return `<ul>${html}</ul>`;
-          });
+        return matches.map(item => {
+          const car1 = getText(item, "carno1");
+          const min1 = getText(item, "min1");
+          const car2 = getText(item, "carno2");
+          const min2 = getText(item, "min2");
+          return `<li>${busNo}번 → 차량1: ${car1} (${min1}분 후), 차량2: ${car2} (${min2}분 후)</li>`;
+        }).join("");
+      }).then(html => `<ul>${html}</ul>`);
   }
 
   function getText(parent, tagName) {
-      const el = parent.getElementsByTagName(tagName)[0];
-      return el ? el.textContent : "정보 없음";
+    const el = parent.getElementsByTagName(tagName)[0];
+    return el ? el.textContent : "정보 없음";
   }
-
 </script>
 </body>
 </html>
