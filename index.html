@@ -73,64 +73,127 @@
     });
   });
 
-  // 경로 탐색 및 출력
-  function fetchTransitRoute() {
+  async function fetchTransitRoute() {
     if (!startCoords || !endCoords) return alert("출발지 또는 도착지 좌표가 없습니다.");
 
     const url = `https://api.odsay.com/v1/api/searchPubTransPathT?SX=${startCoords.x}&SY=${startCoords.y}&EX=${endCoords.x}&EY=${endCoords.y}&SearchPathType=2&apiKey=${odsayKey}`;
 
-    $.get(url).done(data => {
-      console.log(data); // 모든 경로 log에 출력
-      const paths = data.result?.path?.slice(0, 4); // 경로 최대 4개까지 출력
-      if (!paths || paths.length === 0) return alert("경로를 찾을 수 없습니다.");
+    const response = await $.get(url);
+    const paths = response.result?.path?.slice(0, 4);
+    if (!paths || paths.length === 0) return alert("경로를 찾을 수 없습니다.");
 
-      const $result = $("#route-result").empty();
-      const busArrivalCache = new Map();
+    const busArrivalCache = new Map();
 
-      paths.forEach((path, idx) => {
-        const { totalTime, busTransitCount } = path.info;
-        const $card = $(`<div style="margin-bottom:20px;padding:10px;background:#fff;border:1px solid #ccc;border-radius:8px;">
-          <h3>[경로 ${idx + 1}] 소요시간: ${totalTime}분 (버스 환승 ${busTransitCount}회)</h3>
-        </div>`);
+    // 모든 경로 분석 (walk, transfers, min1 도착시간 포함)
+    const scoredPaths = await Promise.all(paths.map(async (path) => {
+      let walkTime = 0;
+      let transfers = path.info.busTransitCount;
+      let minArrival = Infinity;
 
-        let totalWalk = 0, totalBus = 0;
+      for (const sub of path.subPath) {
+        if (sub.trafficType === 3) {
+          walkTime += sub.sectionTime;
+        } else if (sub.trafficType === 2) {
+          const busNo = sub.lane[0].busNo;
+          const stationId = sub.startLocalStationID;
+          const cacheKey = `${stationId}_${busNo}`;
+          let min1 = 999;
 
-        path.subPath.forEach(sub => {
-          if (sub.trafficType === 3) {
-            totalWalk += sub.sectionTime;
-            $card.append(`<p>도보 ${sub.sectionTime}분 이동</p>`);
-          } else if (sub.trafficType === 2) {
-            const busNo = sub.lane[0].busNo;
-            const { startLocalStationID: stationId, startName, endName, endLocalStationID } = sub;
-            totalBus += sub.sectionTime;
-
-            const cacheKey = `${stationId}_${busNo}`;
-            const $arrival = $(`<div class="bus-arrival">[버스 도착 정보 로딩 중...]</div>`);
-            const $bus = $(`
-              <div>
-                <p><strong>버스 탑승:</strong> ${busNo}</p>
-                <p>출발: ${startName} (ID: ${stationId}) → 도착: ${endName} (ID: ${endLocalStationID})</p>
-              </div>
-            `).append($arrival);
-            $card.append($bus);
-
-            if (busArrivalCache.has(cacheKey)) {
-              $arrival.html(busArrivalCache.get(cacheKey));
-            } else {
-              fetchBusArrivalInfo(stationId, busNo).then(html => {
-                busArrivalCache.set(cacheKey, html);
-                $arrival.html(html);
-              }).catch(err => {
-                $arrival.text("도착 정보 오류: " + err.message);
-              });
+          if (busArrivalCache.has(cacheKey)) {
+            min1 = busArrivalCache.get(cacheKey);
+          } else {
+            try {
+              const html = await fetchBusArrivalInfo(stationId, busNo);
+              const match = html.match(/(\d+)분 후/);
+              if (match) min1 = parseInt(match[1]);
+              busArrivalCache.set(cacheKey, min1);
+            } catch {
+              min1 = 999;
             }
           }
-        });
 
-        $card.append(`<hr><p>총 도보 시간: ${totalWalk}분</p><p>총 버스 탑승 시간: ${totalBus}분</p>`);
-        $result.append($card);
-      });
+          if (min1 < minArrival) minArrival = min1;
+        }
+      }
+
+      return {
+        path,
+        walkTime,
+        transfers,
+        minArrival,
+        totalTime: path.info.totalTime
+      };
+    }));
+
+    // 최단 시간 경로
+    const fastest = scoredPaths.reduce((a, b) => (a.totalTime < b.totalTime ? a : b));
+    
+    // 최적 경로 (조건 정렬)
+    const sorted = [...scoredPaths].sort((a, b) => {
+      if (a.transfers !== b.transfers) return a.transfers - b.transfers;
+      if (a.walkTime !== b.walkTime) return a.walkTime - b.walkTime;
+      return a.minArrival - b.minArrival;
     });
+    const best = sorted[0];
+
+    const $result = $("#route-result").empty();
+
+    // 두 경로가 다르면 추천 경로도 함께 표시
+    const showFastest = fastest.path.info.totalTime < best.path.info.totalTime;
+
+    if (showFastest) {
+      $result.append(`<h2 style="color:#0a58ca;">🚀 추천 경로 (최단 소요시간)</h2>`);
+      renderRoute(fastest, busArrivalCache, $result);
+    }
+
+    $result.append(`<h2 style="color:#198754;">⭐ 최적 경로 (환승/도보/도착시간 기준)</h2>`);
+    renderRoute(best, busArrivalCache, $result);
+  }
+
+  async function renderRoute(routeData, cache, $container) {
+    const { path } = routeData;
+    const { totalTime, busTransitCount } = path.info;
+
+    const $card = $(`<div style="margin-bottom:20px;padding:10px;background:#fff;border:1px solid #ccc;border-radius:8px;">
+      <h3>소요시간: ${totalTime}분 (버스 환승 ${busTransitCount}회)</h3>
+    </div>`);
+
+    let totalWalk = 0, totalBus = 0;
+
+    for (const sub of path.subPath) {
+      if (sub.trafficType === 3) {
+        totalWalk += sub.sectionTime;
+        $card.append(`<p>도보 ${sub.sectionTime}분 이동</p>`);
+      } else if (sub.trafficType === 2) {
+        const busNo = sub.lane[0].busNo;
+        const { startLocalStationID: stationId, startName, endName, endLocalStationID } = sub;
+        totalBus += sub.sectionTime;
+
+        const cacheKey = `${stationId}_${busNo}`;
+        const $arrival = $(`<div class="bus-arrival">[버스 도착 정보 로딩 중...]</div>`);
+        const $bus = $(`
+          <div>
+            <p><strong>버스 탑승:</strong> ${busNo}</p>
+            <p>출발: ${startName} (ID: ${stationId}) → 도착: ${endName} (ID: ${endLocalStationID})</p>
+          </div>
+        `).append($arrival);
+        $card.append($bus);
+
+        if (cache.has(cacheKey)) {
+          $arrival.html(`도착까지 약 ${cache.get(cacheKey)}분`);
+        } else {
+          try {
+            const html = await fetchBusArrivalInfo(stationId, busNo);
+            $arrival.html(html);
+          } catch (err) {
+            $arrival.text("도착 정보 오류: " + err.message);
+          }
+        }
+      }
+    }
+
+    $card.append(`<hr><p>총 도보 시간: ${totalWalk}분</p><p>총 버스 탑승 시간: ${totalBus}분</p>`);
+    $container.append($card);
   }
 
 
