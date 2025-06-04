@@ -76,7 +76,8 @@
     const busArrivalCache = new Map();
 
     const scoredPaths = await Promise.all(paths.map(async (path) => {
-      let walkTime = 0, transfers = path.info.busTransitCount, minArrival = Infinity, isValid = true;
+      let walkTime = 0, transfers = path.info.busTransitCount, minArrival = Infinity;
+      let isValid = true;
 
       for (const sub of path.subPath) {
         if (sub.trafficType === 3) {
@@ -96,7 +97,7 @@
 
           if (min1 === null) {
             isValid = false;
-            continue;
+            break; // 하나라도 없으면 전체 경로 무효
           }
 
           if (min1 < minArrival) minArrival = min1;
@@ -108,13 +109,18 @@
       };
     }));
 
-    const best = scoredPaths.sort((a, b) => {
+    const validPaths = scoredPaths.filter(p => p.isValid);
+    if (validPaths.length === 0) {
+      $("#route-result").html("<p>도착 정보가 있는 유효한 경로가 없습니다.</p>");
+      return;
+    }
+
+    const best = validPaths.sort((a, b) => {
       if (a.transfers !== b.transfers) return a.transfers - b.transfers;
       if (a.walkTime !== b.walkTime) return a.walkTime - b.walkTime;
       return a.minArrival - b.minArrival;
     })[0];
 
-    const validPaths = scoredPaths.filter(p => p.isValid);
     const fastest = validPaths.reduce((a, b) => a.totalTime < b.totalTime ? a : b, validPaths[0]);
     const showFastest = fastest && fastest.totalTime < best.totalTime && fastest !== best;
 
